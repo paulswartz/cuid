@@ -4,78 +4,177 @@ defmodule Cuid do
 
   Usage:
 
-      # Start the generator
-      {:ok, generator} = Cuid.start_link
-
-      # Generate a new CUID
-      Cuid.generate(generator)
+  ```elixir
+  Cuid.generate()
+  ``
   """
+
+  @opaque state :: {binary(), :ets.tid()}
+
+  @base 36
+  @discrete_values @base * @base * @base * @base
+  @max_discrete_value @discrete_values - 1
+  @two_discrete_values @discrete_values * @discrete_values
+  @max_two_discrete_value @two_discrete_values - 1
 
   @doc """
   Generates and returns a new CUID.
   """
-  @spec generate(generator :: pid) :: String.t
-  def generate(generator) do
-    GenServer.call(generator, :generate)
-  end
+  @spec generate() :: String.t()
+  @spec generate(state) :: String.t()
+  def generate({fingerprint, table} \\ global_state()) do
+    count = :ets.update_counter(table, :counter, {2, 1, @max_discrete_value, 0})
 
-  use GenServer
+    IO.iodata_to_binary([
+      ?c,
+      timestamp(),
+      format_counter(count),
+      fingerprint,
+      random_block()
+    ])
+  end
 
   @doc """
-  Starts a new generator.
+  Get the global state.
+
+  If you're generating a lot of IDs in the same process, this can avoid re-fetching the state on each call.
   """
-  def start_link(process_opts \\ []) do
-    GenServer.start_link(__MODULE__, :ok, process_opts)
+  @spec global_state :: state
+  def global_state() do
+    :persistent_term.get(__MODULE__)
   end
 
-  ## Server callbacks
+  @doc """
+  Creates a new generator state.
+  """
+  def new() do
+    fingerprint = get_fingerprint()
 
-  def init(:ok) do
-    {:ok, %{:fingerprint => get_fingerprint, :count => 0}}
-  end
+    tab =
+      :ets.new(__MODULE__, [:public, :set, {:read_concurrency, true}, {:write_concurrency, true}])
 
-  def handle_call(:generate, _, %{:fingerprint => fingerprint, :count => count} = state) do
-    cuid = Enum.join([
-      "c", timestamp, format_counter(count), fingerprint, random_block, random_block
-    ]) |> String.downcase
+    :ets.insert(tab, {:counter, 0})
 
-    {:reply, cuid, %{state | :count => count + 1}}
+    {fingerprint, tab}
   end
 
   ## Helpers
 
-  @block_size 4
-  @base 36
-
   defp format_counter(num) do
     num
-    |> Integer.to_string(@base)
-    |> String.rjust(@block_size, ?0)
+    |> Integer.to_charlist(@base)
+    |> zero_pad_down()
   end
 
-  @discrete_values 1_679_616
-
   defp timestamp do
-    {mega, uni, micro} = :os.timestamp
-    rem((mega * 1_000_000 + uni) * 1_000_000 + micro, @discrete_values * @discrete_values)
-    |> Integer.to_string @base
+    microseconds = :os.system_time(:microsecond)
+
+    rem(microseconds, @two_discrete_values)
+    |> Integer.to_charlist(@base)
+    |> zero_pad_down_big()
   end
 
   defp random_block do
-    :random.uniform(@discrete_values - 1)
-    |> Integer.to_string(@base)
-    |> String.rjust(@block_size, ?0)
+    @max_two_discrete_value
+    |> :rand.uniform()
+    |> Integer.to_charlist(@base)
+    |> zero_pad_down_big()
   end
 
   @operator @base * @base
 
   defp get_fingerprint do
-    pid = rem(String.to_integer(System.get_pid), @operator) * @operator
+    pid = rem(String.to_integer(System.get_pid()), @operator) * @operator
 
-    hostname = to_char_list :net_adm.localhost
+    hostname = to_charlist(:net_adm.localhost())
     hostid = rem(Enum.sum(hostname) + Enum.count(hostname) + @base, @operator)
 
-    pid + hostid
-    |> Integer.to_string(@base)
+    (pid + hostid)
+    |> Integer.to_charlist(@base)
+    |> zero_pad_down()
   end
+
+  @compile {:inline, zero_pad_down: 1, zero_pad_down_big: 1, downcase_num: 1}
+
+  defp zero_pad_down(charlist) do
+    case charlist do
+      [a, b, c, d] ->
+        [downcase_num(a), downcase_num(b), downcase_num(c), downcase_num(d)]
+
+      [a, b, c] ->
+        [?0, downcase_num(a), downcase_num(b), downcase_num(c)]
+
+      [a, b] ->
+        ["00", downcase_num(a), downcase_num(b)]
+
+      [a] ->
+        ["000", downcase_num(a)]
+    end
+  end
+
+  defp zero_pad_down_big(charlist) do
+    case charlist do
+      [a, b, c, d, e, f, g, h] ->
+        [
+          downcase_num(a),
+          downcase_num(b),
+          downcase_num(c),
+          downcase_num(d),
+          downcase_num(e),
+          downcase_num(f),
+          downcase_num(g),
+          downcase_num(h)
+        ]
+
+      [a, b, c, d, e, f, g] ->
+        [
+          ?0,
+          downcase_num(a),
+          downcase_num(b),
+          downcase_num(c),
+          downcase_num(d),
+          downcase_num(e),
+          downcase_num(f),
+          downcase_num(g)
+        ]
+
+      [a, b, c, d, e, f] ->
+        [
+          "00",
+          downcase_num(a),
+          downcase_num(b),
+          downcase_num(c),
+          downcase_num(d),
+          downcase_num(e),
+          downcase_num(f)
+        ]
+
+      [a, b, c, d, e] ->
+        [
+          "000",
+          downcase_num(a),
+          downcase_num(b),
+          downcase_num(c),
+          downcase_num(d),
+          downcase_num(e)
+        ]
+
+      [a, b, c, d] ->
+        ["0000", downcase_num(a), downcase_num(b), downcase_num(c), downcase_num(d)]
+
+      [a, b, c] ->
+        ["00000", downcase_num(a), downcase_num(b), downcase_num(c)]
+
+      [a, b] ->
+        ["000000", downcase_num(a), downcase_num(b)]
+
+      [a] ->
+        ["0000000", downcase_num(a)]
+    end
+  end
+
+  @downcase_index ?a - ?A
+
+  defp downcase_num(letter) when letter > ?9, do: letter + @downcase_index
+  defp downcase_num(number), do: number
 end

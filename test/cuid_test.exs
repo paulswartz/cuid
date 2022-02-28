@@ -2,29 +2,52 @@ defmodule CuidTest do
   use ExUnit.Case, async: true
   require Cuid
 
-  setup do
-    {:ok, generator} = Cuid.start_link
-    {:ok, generator: generator}
+  test "generate string" do
+    assert is_binary(Cuid.generate())
   end
 
-  test "generate string", %{generator: generator} do
-    assert is_binary Cuid.generate(generator)
+  test "format" do
+    for _ <- 0..500_000 do
+      c = Cuid.generate()
+      assert <<"c", _::binary-24>> = c
+    end
   end
 
-  test "format", %{generator: generator} do
-    c = Cuid.generate(generator)
-    assert String.length(c) == 25
-    assert String.starts_with?(c, "c")
-  end
-
-  test "collision", %{generator: generator} do
+  test "collision" do
     number_of_iterations = 200_000
 
     result =
-      Stream.repeatedly(fn -> Cuid.generate(generator) end)
+      stream()
       |> Stream.take(number_of_iterations)
-      |> Enum.into(HashSet.new)
+      |> MapSet.new()
 
-    assert result.size == number_of_iterations
+    assert MapSet.size(result) == number_of_iterations
+  end
+
+  test "multi-process collision" do
+    number_of_iterations = 100_000
+    task_count = 16
+
+    tasks =
+      for _ <- 1..task_count do
+        Task.async(fn ->
+          stream()
+          |> Stream.take(number_of_iterations)
+          |> MapSet.new()
+        end)
+      end
+
+    result_set =
+      Enum.reduce(tasks, MapSet.new(), fn task, set ->
+        task
+        |> Task.await()
+        |> MapSet.union(set)
+      end)
+
+    assert MapSet.size(result_set) == number_of_iterations * task_count
+  end
+
+  defp stream do
+    Stream.repeatedly(&Cuid.generate/0)
   end
 end
